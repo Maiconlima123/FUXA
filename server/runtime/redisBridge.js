@@ -455,9 +455,9 @@ function create(options) {
             let result;
             if (activeConfig.maxlen) {
                 result = client.xadd(activeConfig.stream, 'MAXLEN', '~', activeConfig.maxlen,
-                    '*', 'type', type, 'data', message);
+                    '*', 'event', message, 'type', type);
             } else {
-                result = client.xadd(activeConfig.stream, '*', 'type', type, 'data', message);
+                result = client.xadd(activeConfig.stream, '*', 'event', message, 'type', type);
             }
             if (result && typeof result.catch === 'function') {
                 result.catch(function (err) {

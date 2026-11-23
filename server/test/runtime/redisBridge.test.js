@@ -50,9 +50,9 @@ function setup(config) {
 
 function publishedEvents(client) {
     return client.xaddCalls.map(function (args) {
-        const dataIndex = args.indexOf('data');
-        assert.notEqual(dataIndex, -1, 'xadd must carry a data field');
-        return JSON.parse(args[dataIndex + 1]);
+        const eventIndex = args.indexOf('event');
+        assert.notEqual(eventIndex, -1, 'xadd must carry an event field');
+        return JSON.parse(args[eventIndex + 1]);
     });
 }
 
