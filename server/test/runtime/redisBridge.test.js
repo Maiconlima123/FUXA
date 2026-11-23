@@ -207,14 +207,16 @@ describe('runtime redis bridge', function () {
         ctx.bridge.setReadyHandler(function () { calls++; });
         client.listeners['ready']();
         client.listeners['ready']();
-        assert.equal(calls, 2);
+        // one immediate invocation because the fake client is already ready,
+        // plus one per ready event.
+        assert.equal(calls, 3);
 
         ctx.bridge.setReadyHandler(function () { throw new Error('ready boom'); });
         assert.doesNotThrow(function () { client.listeners['ready'](); });
 
         ctx.bridge.setReadyHandler(null);
         client.listeners['ready']();
-        assert.equal(calls, 2);
+        assert.equal(calls, 3);
     });
 
     it('stops cleanly, removing listeners and closing the client', async function () {

@@ -26,6 +26,7 @@ const recipeService = require('./recipes/recipe-service');
 var jobs = require('./jobs');
 var redisBridge = require('./redisBridge');
 var fuxaTagCatalog = require('./fuxaTagCatalog');
+var redisCommandBridge = require('./redisCommandBridge');
 
 var api;
 var settings
@@ -37,6 +38,7 @@ var scriptsMgr;
 var jobsMgr;
 var redisBridgeMgr;
 var tagCatalogMgr;
+var redisCommandBridgeMgr;
 var schedulerInitPromise = Promise.resolve();
 var tagsSubscription = new Map();
 var socketPool = new Map();
@@ -143,8 +145,20 @@ function init(_io, _api, _settings, _log, eventsMain) {
         bridge: function () { return redisBridgeMgr; },
         getDevices: function () { return project.getDevices(); }
     });
-    tagCatalogMgr.bind();
 
+    // opt-in command channel: consume tag.write requests from Redis Streams
+    // (disabled by default; started only after the devices are loaded)
+    redisCommandBridgeMgr = redisCommandBridge.create({
+        logger: logger,
+        settings: function () { return settings.redisBridge; },
+        // project owns the tag catalog; devices owns the active drivers
+        devices: {
+            getDevices: function () { return project.getDevices(); },
+            getDeviceIdFromTag: devices.getDeviceIdFromTag,
+            getTagValue: devices.getTagValue,
+            setTagValue: devices.setTagValue
+        }
+    });
     events.on('project-device:change', updateDevice);
     events.on('device-value:changed', updateDeviceValues);
     events.on('device-status:changed', updateDeviceStatus);
@@ -520,6 +534,14 @@ function start() {
                         logger.error('runtime.failed-to-start-tag-catalog: ' + err);
                     }
                 }
+                // devices are loaded: accept tag.write commands from Redis
+                if (redisCommandBridgeMgr) {
+                    try {
+                        redisCommandBridgeMgr.start();
+                    } catch (err) {
+                        logger.error('runtime.failed-to-start-redis-command-bridge: ' + err);
+                    }
+                }
                 resolve(true);
             }).catch(function (err) {
                 logger.error('runtime.failed-to-start-devices: ' + err);
@@ -583,6 +605,9 @@ function stop() {
             }),
             (redisBridgeMgr ? redisBridgeMgr.stop() : Promise.resolve()).catch(function (err) {
                 logger.error('runtime.failed-to-stop-redisBridge: ' + err);
+            }),
+            (redisCommandBridgeMgr ? redisCommandBridgeMgr.stop() : Promise.resolve()).catch(function (err) {
+                logger.error('runtime.failed-to-stop-redis-command-bridge: ' + err);
             }),
             Promise.resolve().then(function () {
                 if (tagCatalogMgr) {
@@ -924,6 +949,7 @@ var runtime = module.exports = {
     get scriptsMgr() { return scriptsMgr },
     get jobsMgr() { return jobsMgr },
     get redisBridge() { return redisBridgeMgr },
+    get redisCommandBridge() { return redisCommandBridgeMgr },
     events: events,
     scriptSendCommand: scriptSendCommand,
     checkPermissionEnabled: checkPermissionEnabled,
