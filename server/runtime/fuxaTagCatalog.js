@@ -176,6 +176,32 @@ function create(options) {
     /**
      * Publish every known tag as one event and rebase the diff baseline.
      */
+    function writeCatalogKey(tags) {
+        try {
+            const bridge = getBridge();
+            const client = bridge && bridge.client;
+            if (!client || client.status !== 'ready') {
+                return false;
+            }
+            const body = JSON.stringify({
+                version: 1,
+                updatedAt: new Date().toISOString(),
+                count: tags.length,
+                tags: tags
+            });
+            const result = client.set(CATALOG_KEY, body);
+            if (result && typeof result.catch === 'function') {
+                result.catch(function (err) {
+                    logError('failed to persist catalog key', err);
+                });
+            }
+            return true;
+        } catch (err) {
+            logError('failed to persist catalog key', err);
+            return false;
+        }
+    }
+
     function publishSnapshot() {
         if (!started) {
             return false;
@@ -183,6 +209,8 @@ function create(options) {
         try {
             const tags = collectTags();
             knownTags = indexTags(tags);
+            // Durable catalog for consumers that missed the stream snapshot.
+            writeCatalogKey(tags);
             return publishEvent('tag.snapshot', {
                 count: tags.length,
                 tags: tags
@@ -335,11 +363,40 @@ function create(options) {
         }
     }
 
+    const CATALOG_KEY = process.env.FUXA_REDIS_CATALOG_KEY || 'fuxa:catalog:tags';
+    const SNAPSHOT_INTERVAL_MS = Math.max(15000, Number(process.env.FUXA_REDIS_SNAPSHOT_INTERVAL_MS) || 60000);
+    let snapshotRetry = null;
+    let snapshotTimer = null;
+
+    function retrySnapshot(attempt) {
+        snapshotRetry = null;
+        if (!started) return;
+        if (publishSnapshot()) return;
+        if (attempt >= 30) return;
+        snapshotRetry = setTimeout(function () {
+            retrySnapshot(attempt + 1);
+        }, 1000);
+    }
+
     function start() {
         bind();
         started = true;
         bindBridge();
-        return publishSnapshot();
+        // The Redis bridge connects asynchronously. The first snapshot may be
+        // dropped until the client is ready; retry briefly instead of losing it.
+        const bridge = getBridge();
+        const bridgeEnabled = bridge && (typeof bridge.isEnabled !== 'function' || bridge.isEnabled());
+        const published = publishSnapshot();
+        if (!published && bridgeEnabled) retrySnapshot(1);
+        // Refresh the durable catalog and stream snapshot periodically so a
+        // consumer that was offline does not depend on the high-frequency
+        // tag.changed stream retaining the startup snapshot.
+        if (snapshotTimer) clearInterval(snapshotTimer);
+        snapshotTimer = setInterval(function () {
+            if (started) publishSnapshot();
+        }, SNAPSHOT_INTERVAL_MS);
+        if (snapshotTimer.unref) snapshotTimer.unref();
+        return published;
     }
 
     function stop() {
@@ -347,6 +404,14 @@ function create(options) {
         if (timer) {
             clearTimeout(timer);
             timer = null;
+        }
+        if (snapshotRetry) {
+            clearTimeout(snapshotRetry);
+            snapshotRetry = null;
+        }
+        if (snapshotTimer) {
+            clearInterval(snapshotTimer);
+            snapshotTimer = null;
         }
         unbindBridge();
         unbind();

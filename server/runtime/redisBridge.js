@@ -461,6 +461,11 @@ function create(options) {
         if (!client || !activeConfig) {
             return false;
         }
+        // With enableOfflineQueue:false, XADD while connecting/reconnecting throws.
+        // Fire-and-forget bridge: drop now; the ready handler republishes snapshots.
+        if (client.status && client.status !== 'ready') {
+            return false;
+        }
         try {
             const event = buildEvent(type, payload, activeConfig.source);
             const message = JSON.stringify(event);
@@ -672,6 +677,15 @@ function create(options) {
          */
         setReadyHandler: function (handler) {
             readyHandler = typeof handler === 'function' ? handler : null;
+            // If the client is already connected when the handler is registered,
+            // invoke it once so startup snapshots are not lost.
+            if (readyHandler && client && client.status === 'ready') {
+                try {
+                    readyHandler();
+                } catch (err) {
+                    logError('ready handler failed', err);
+                }
+            }
         },
         isEnabled: isEnabled,
         isStarted: function () { return started; },
