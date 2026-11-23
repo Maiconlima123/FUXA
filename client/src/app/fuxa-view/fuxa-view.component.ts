@@ -27,6 +27,7 @@ import { NgxTouchKeyboardDirective } from '../framework/ngx-touch-keyboard/ngx-t
 import { HmiService } from '../_services/hmi.service';
 import { EndPointApi } from '../_helpers/endpointapi';
 import { HtmlSelectComponent } from '../gauges/controls/html-select/html-select.component';
+import { HtmlButtonComponent } from '../gauges/controls/html-button/html-button.component';
 import { FuxaViewDialogComponent, FuxaViewDialogData } from './fuxa-view-dialog/fuxa-view-dialog.component';
 import { DialogPosition as DialogPosition, MatDialog as MatDialog } from '@angular/material/dialog';
 import { WebcamPlayerDialogComponent, WebcamPlayerDialogData } from '../gui-helpers/webcam-player/webcam-player-dialog/webcam-player-dialog.component';
@@ -53,6 +54,7 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
     @Input() sourceDeviceId: string;
     @Output() onclose = new EventEmitter();
     @Output() ongoto: EventEmitter<string> = new EventEmitter();
+    @Output() onpage: EventEmitter<PageNavigationRequest> = new EventEmitter();
 
     @ViewChild('dataContainer', {static: false}) dataContainer: ElementRef;
     @ViewChild('inputDialogRef', {static: false}) inputDialogRef: ElementRef;
@@ -84,6 +86,8 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
     private destroy$ = new Subject<void>();
     private loadOk = false;
     private zIndexCounter = 1000;
+
+    private buttonActionDisposers: Array<() => void> = [];
 
     constructor(
         private translateService: TranslateService,
@@ -132,6 +136,8 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
             if (this['subscriptionOnGaugeEvent']) {
                 this['subscriptionOnGaugeEvent'].unsubscribe();
             }
+            this.buttonActionDisposers.forEach(dispose => dispose());
+            this.buttonActionDisposers = []; // prevent running dispose again if ngOnDestroy is called multiple times
             if (this.inputDialogRef) {
                 this.inputDialogRef.nativeElement.style.display = 'none';
             }
@@ -216,6 +222,8 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
                     this.gaugesManager.unbindGauge(this.id);
                     this.clearGaugeStatus();
                     this.viewContainerRef.clear();
+                    this.buttonActionDisposers.forEach(dispose => dispose());
+                    this.buttonActionDisposers = [];
                     this.dataContainer.nativeElement.innerHTML = '';
                 } catch (err) {
                     console.error(err);
@@ -583,7 +591,17 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
                     self.runEvents(self, ga, ev, mouseOutEvents);
                 });
             }
+            if (HtmlButtonComponent.hasButtonAction(ga)) {
+                self.bindButtonAction(ga, svgele.node);
+            }
         }
+    }
+
+    private bindButtonAction(ga: GaugeSettings, element: HTMLElement) {
+        this.buttonActionDisposers.push(HtmlButtonComponent.bindAction(ga, element, {
+            read: () => this.hmiService.variables[ga.property.variableId]?.value,
+            write: (value: string) => this.gaugesManager.putSignalValue(ga.property.variableId, value)
+        }));
     }
 
     public runEvents(self: any, ga: GaugeSettings, ev: any, events: any) {
@@ -591,7 +609,7 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
             let actindex = Object.keys(GaugeEventActionType).indexOf(events[i].action);
             let eventTypes = Object.values(GaugeEventActionType);
             if (eventTypes.indexOf(GaugeEventActionType.onpage) === actindex) {
-                self.loadPage(ev, events[i].actparam, events[i].actoptions);
+                self.onPageRequest({ event: ev, viewref: events[i].actparam, options: events[i].actoptions });
             } else if (eventTypes.indexOf(GaugeEventActionType.onwindow) === actindex) {
                 self.onOpenCard(ga.id, ev, events[i].actparam, events[i].actoptions);
             } else if (eventTypes.indexOf(GaugeEventActionType.ondialog) === actindex) {
@@ -875,6 +893,14 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
         this.cards = [];
     }
 
+    onPageRequest(request: PageNavigationRequest) {
+        if (this.child) {
+            this.onpage.emit(request);
+            return;
+        }
+        return this.loadPage(request.event, request.viewref, request.options);
+    }
+
     async loadPage(param: any, viewref: string, options: any) {
         let view: View = await this.getView(viewref);
         this.closeAllCards();
@@ -901,7 +927,8 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
             variablesMapping: options.variablesMapping,
             disableDefaultClose: options.hideClose,
             gaugesManager: this.gaugesManager,
-            sourceDeviceId: options.sourceDeviceId
+            sourceDeviceId: options.sourceDeviceId,
+            onPage: request => this.onPageRequest(request)
         };
         let dialogRef = this.fuxaDialog.open(FuxaViewDialogComponent, {
             panelClass: 'fuxa-dialog-property',
@@ -1233,6 +1260,12 @@ export class FuxaViewComponent implements OnInit, AfterViewInit, OnDestroy {
             nativeElement.style.transform = 'translate(-50%, -50%)';
         }
     }
+}
+
+export interface PageNavigationRequest {
+    event: any;
+    viewref: string;
+    options: any;
 }
 
 interface VariableMappingType {
