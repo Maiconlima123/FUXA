@@ -24,6 +24,7 @@ const schedulerService = require('./scheduler/scheduler-service');
 const recipeStorage = require('./recipes/recipe-storage');
 const recipeService = require('./recipes/recipe-service');
 var jobs = require('./jobs');
+var redisBridge = require('./redisBridge');
 
 var api;
 var settings
@@ -33,6 +34,7 @@ var alarmsMgr;
 var notificatorMgr;
 var scriptsMgr;
 var jobsMgr;
+var redisBridgeMgr;
 var schedulerInitPromise = Promise.resolve();
 var tagsSubscription = new Map();
 var socketPool = new Map();
@@ -123,6 +125,14 @@ function init(_io, _api, _settings, _log, eventsMain) {
     scriptsMgr = scripts.create(runtime);
     jobsMgr = jobs.create(runtime);
     devices.init(runtime);
+
+    // opt-in bridge: publish runtime events to Redis Streams (disabled by default)
+    redisBridgeMgr = redisBridge.create({
+        events: events,
+        logger: logger,
+        settings: function () { return settings.redisBridge; }
+    });
+    redisBridgeMgr.start();
 
     events.on('project-device:change', updateDevice);
     events.on('device-value:changed', updateDeviceValues);
@@ -481,6 +491,10 @@ function init(_io, _api, _settings, _log, eventsMain) {
 
 function start() {
     return new Promise(function (resolve, reject) {
+        // restart after runtime.restart(): no-op when the bridge is already running
+        if (redisBridgeMgr) {
+            redisBridgeMgr.start();
+        }
         // load project
         project.load().then(result => {
             return schedulerInitPromise.then(() => schedulerService.loadSchedulers());
@@ -547,6 +561,9 @@ function stop() {
             }),
             jobsMgr.stop().catch(function (err) {
                 logger.error('runtime.failed-to-stop-jobsMgr: ' + err);
+            }),
+            (redisBridgeMgr ? redisBridgeMgr.stop() : Promise.resolve()).catch(function (err) {
+                logger.error('runtime.failed-to-stop-redisBridge: ' + err);
             })
         ]).then(function () {
             resolve(true);
@@ -869,6 +886,7 @@ var runtime = module.exports = {
     get notificatorMgr() { return notificatorMgr },
     get scriptsMgr() { return scriptsMgr },
     get jobsMgr() { return jobsMgr },
+    get redisBridge() { return redisBridgeMgr },
     events: events,
     scriptSendCommand: scriptSendCommand,
     checkPermissionEnabled: checkPermissionEnabled,

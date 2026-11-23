@@ -30,6 +30,17 @@ function makeSettings() {
                 username: 'daq-user',
                 password: 'daq-secret'
             }
+        },
+        redisBridge: {
+            enabled: true,
+            host: 'redis.internal',
+            port: 6380,
+            username: 'fuxa',
+            password: 'redis-secret',
+            tls: false,
+            db: 0,
+            stream: 'stream:fuxa:events',
+            maxlen: 100000
         }
     };
 }
@@ -51,6 +62,10 @@ describe('Security - settings disclosure', () => {
             expect(result).to.not.have.property('https');
             expect(result.smtp).to.not.have.property('password');
             expect(result.daqstore).to.not.have.property('credentials');
+            if (result.redisBridge) {
+                expect(result.redisBridge).to.not.have.property('password');
+                expect(result.redisBridge).to.have.property('hasPassword', true);
+            }
         }
 
         expect(settings).to.deep.equal(makeSettings());
@@ -70,6 +85,7 @@ describe('Security - settings disclosure', () => {
             type: 'influxDB',
             database: 'fuxa'
         });
+        expect(publicSettings).to.not.have.property('redisBridge');
     });
 
     it('keeps non-secret connection details available to admins', () => {
@@ -84,6 +100,14 @@ describe('Security - settings disclosure', () => {
             url: 'http://influx.internal:8086',
             host: 'questdb.internal',
             configurationString: 'http::addr=questdb.internal:9000;username=daq-user;password=daq-secret;'
+        });
+        expect(adminSettings.redisBridge).to.include({
+            enabled: true,
+            host: 'redis.internal',
+            port: 6380,
+            username: 'fuxa',
+            stream: 'stream:fuxa:events',
+            maxlen: 100000
         });
     });
 });

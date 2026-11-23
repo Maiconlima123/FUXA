@@ -6,7 +6,7 @@ import { DiagnoseService } from '../../_services/diagnose.service';
 import { TranslateService } from '@ngx-translate/core';
 import { ToastrService } from 'ngx-toastr';
 
-import { AlarmsRetentionType, AppSettings, DaqStore, DaqStoreRetentionType, DaqStoreType, MailMessage, SmtpSettings, StoreCredentials, LogsSettings, AlarmsSettings } from '../../_models/settings';
+import { AlarmsRetentionType, AppSettings, DaqStore, DaqStoreRetentionType, DaqStoreType, MailMessage, SmtpSettings, StoreCredentials, LogsSettings, AlarmsSettings, RedisBridgeSettings } from '../../_models/settings';
 import { Utils } from '../../_helpers/utils';
 import { APP_LANGUAGES } from '../../_models/language';
 
@@ -42,6 +42,10 @@ export class AppSettingsComponent implements OnInit {
     smtpTesting = false;
     smtpTestAddress = '';
     showPassword = false;
+    showRedisPassword = false;
+    redisTesting = false;
+    redisTestOk: boolean = null;
+    redisTestMessage = '';
 
     daqstoreType = DaqStoreType;
     retationType = DaqStoreRetentionType;
@@ -107,6 +111,8 @@ export class AppSettingsComponent implements OnInit {
             this.settings.swaggerEnabled = false;
         }
         this.originalSwaggerEnabled = this.settings.swaggerEnabled;
+
+        this.settings.redisBridge = new RedisBridgeSettings(this.settings.redisBridge);
     }
 
     onNoClick() {
@@ -169,6 +175,38 @@ export class AppSettingsComponent implements OnInit {
             return false;
         }
         return true;
+    }
+
+    isRedisTestReady() {
+        if (this.redisTesting) {
+            return false;
+        }
+        return !!(this.settings.redisBridge.host || this.settings.redisBridge.url);
+    }
+
+    onRedisTest() {
+        this.redisTesting = true;
+        this.redisTestOk = null;
+        this.redisTestMessage = '';
+        this.settingsService.testRedisConnection(this.settings.redisBridge).subscribe({
+            next: (result) => {
+                this.redisTesting = false;
+                this.redisTestOk = !!result.ok;
+                const key = result.ok ? 'msg.redis-test-success' : 'msg.redis-test-error';
+                this.translateService.get(key, {
+                    latency: result.latencyMs !== undefined ? result.latencyMs : 0,
+                    error: result.error || ''
+                }).subscribe((txt: string) => { this.redisTestMessage = txt; });
+            },
+            error: (err) => {
+                this.redisTesting = false;
+                this.redisTestOk = false;
+                this.translateService.get('msg.redis-test-error', {
+                    latency: 0,
+                    error: (err && (err.error?.error || err.message)) || ''
+                }).subscribe((txt: string) => { this.redisTestMessage = txt; });
+            }
+        });
     }
 
     keyDownStopPropagation(event) {

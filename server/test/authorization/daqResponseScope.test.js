@@ -34,6 +34,7 @@ function createRuntime(getNodeValues) {
         path,
         jsonwebtoken: { verify: token => ({ id: token, groups: 1 }) },
         './localization': { init() {} },
+        './redisBridge': { create: () => ({ start() {}, stop: () => Promise.resolve() }) },
         './storage/daqstorage': {
             init() {},
             getNodeValues(...args) {

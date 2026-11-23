@@ -32,6 +32,7 @@
     "fontkit": "^2.0.2",
     "fs-extra": "7.0.1",
     "influx": "5.9.3",
+    "ioredis": "^6.1.0",
     "jsonwebtoken": "^9.0.3",
     "morgan": "1.12.1",
     "mqtt": "4.3.7",

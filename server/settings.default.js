@@ -131,6 +131,12 @@ module.exports = {
     //snapshots retention in days
     webcamSnapShotsRetain: 7,
 
+    // Redis Streams bridge (opt-in, external Redis service).
+    // Values saved in the editor (Settings > Redis) take precedence over the
+    // environment: FUXA_REDIS_ENABLED, FUXA_REDIS_URL, FUXA_REDIS_STREAM,
+    // FUXA_REDIS_MAXLEN. FUXA never starts or embeds a Redis server.
+    redisBridge: {},
+
     swaggerEnabled: false,
 
     nodeRedEnabled: false,

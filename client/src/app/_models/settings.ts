@@ -41,6 +41,66 @@ export class AppSettings {
     nodeRedAuthMode = 'secure';
     /** Enable Swagger */
     swaggerEnabled = false;
+    /** Publish runtime events to an external Redis service */
+    redisBridge = new RedisBridgeSettings();
+}
+
+export class RedisBridgeSettings {
+    /** Enable publishing to the external Redis service */
+    enabled = false;
+    /** Redis host name or IP address */
+    host = '127.0.0.1';
+    /** Redis port */
+    port = 6379;
+    /** Authentication username (ACL) */
+    username = '';
+    /** Authentication password (never returned by the server) */
+    password = '';
+    /** Use TLS (rediss://) */
+    tls = false;
+    /** Database index */
+    db = 0;
+    /** Redis stream key */
+    stream = 'stream:fuxa:events';
+    /** Approximate maximum stream length (0 = unlimited) */
+    maxlen = 0;
+    /** Optional full connection URL, used only when host is empty */
+    url = '';
+    /** Read only flag from the server: a password is stored */
+    hasPassword = false;
+    /** Read only flag from the server: a URL with credentials is stored */
+    hasUrl = false;
+
+    constructor(settings: Partial<RedisBridgeSettings> = null) {
+        if (settings) {
+            if (settings.enabled !== undefined) { this.enabled = !!settings.enabled; }
+            if (settings.host !== undefined) { this.host = settings.host; }
+            if (settings.port !== undefined) { this.port = Number(settings.port); }
+            if (settings.username !== undefined) { this.username = settings.username; }
+            if (settings.password !== undefined) { this.password = settings.password; }
+            if (settings.tls !== undefined) { this.tls = !!settings.tls; }
+            if (settings.db !== undefined) { this.db = Number(settings.db); }
+            if (settings.stream !== undefined) { this.stream = settings.stream; }
+            if (settings.maxlen !== undefined) { this.maxlen = Number(settings.maxlen); }
+            if (settings.url !== undefined) { this.url = settings.url; }
+            this.hasPassword = !!settings.hasPassword;
+            this.hasUrl = !!settings.hasUrl;
+        }
+    }
+
+    isEquals(other: RedisBridgeSettings) {
+        return !!other &&
+            this.enabled === other.enabled &&
+            this.host === other.host &&
+            Number(this.port) === Number(other.port) &&
+            this.username === other.username &&
+            this.password === other.password &&
+            this.tls === other.tls &&
+            Number(this.db) === Number(other.db) &&
+            this.stream === other.stream &&
+            Number(this.maxlen) === Number(other.maxlen) &&
+            this.url === other.url;
+    }
 }
 
 export class EditorSectionMessagesSettings {

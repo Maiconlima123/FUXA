@@ -47,6 +47,7 @@ function registerRuntime(io, log) {
     const dependencies = {
         bluebird: require('bluebird'), './events': Events, './utils': utils,
         path, jsonwebtoken: jwt, './localization': { init },
+        './redisBridge': { create: () => ({ start() {}, stop: () => Promise.resolve() }) },
         './storage/daqstorage': { init, getNodeValues: () => Promise.resolve([]) }
     };
     dependencies['./devices'] = { init, getDevicesValues: () => ({}) };

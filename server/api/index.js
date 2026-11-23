@@ -26,6 +26,7 @@ const reports = require('../dist/reports.service');
 const reportsApi = new reports.ReportsApiService();
 const verifyApiOrToken = require('./apikeys/verify-api-or-token');
 const utils = require('../runtime/utils');
+const redisBridge = require('../runtime/redisBridge');
 
 const version = '1.0.0';
 
@@ -134,7 +135,7 @@ function init(_server, _runtime) {
             /**
              * POST Server user settings
              */
-            apiApp.post("/api/settings", authMiddleware, function(req, res, next) {
+            const saveSettingsHandler = function(req, res, next) {
                 const permission = verifyGroups(req);
                 if (res.statusCode === 403) {
                     runtime.logger.error("api post settings: Tocken Expired");
@@ -155,6 +156,19 @@ function init(_server, _runtime) {
                         if (req.body.secureEnabled && !req.body.secretCode) {
                             req.body.secretCode = utils.generateSecretCode();
                             runtime.logger.warn('Generated random JWT secret because secureEnabled=true and no secretCode was provided.');
+                        }
+                        if (req.body.redisBridge) {
+                            const redisErrors = redisBridge.validateSettings(req.body.redisBridge);
+                            if (redisErrors.length) {
+                                res.status(400).json({
+                                    error: 'invalid_redis_settings',
+                                    message: redisErrors.join('; ')
+                                });
+                                return;
+                            }
+                            // an empty password keeps the stored one
+                            req.body.redisBridge = redisBridge.mergeSettings(
+                                runtime.settings.redisBridge, req.body.redisBridge);
                         }
                         const prevAuth = {
                             secureEnabled: runtime.settings.secureEnabled,
@@ -185,6 +199,38 @@ function init(_server, _runtime) {
                         res.status(400).json({ error: "unexpected_error", message: err });
                         runtime.logger.error("api post settings: " + err);
                     }
+                }
+            };
+            apiApp.post("/api/settings", authMiddleware, saveSettingsHandler);
+            apiApp.put("/api/settings", authMiddleware, saveSettingsHandler);
+
+            /**
+             * POST Test a connection to an external Redis service (admin only).
+             * The password is never returned, only ok/latency/error.
+             */
+            apiApp.post('/api/settings/redis/test', authMiddleware, async function (req, res) {
+                const permission = verifyGroups(req);
+                if (!authJwt.haveAdminPermission(permission)) {
+                    res.status(401).json({ error: 'unauthorized_error', message: 'Unauthorized!' });
+                    return;
+                }
+                try {
+                    const incoming = req.body && req.body.redisBridge ? req.body.redisBridge : (req.body || {});
+                    const errors = redisBridge.validateSettings(incoming);
+                    if (errors.length) {
+                        res.status(400).json({ ok: false, error: errors.join('; ') });
+                        return;
+                    }
+                    const merged = redisBridge.mergeSettings(runtime.settings.redisBridge, incoming);
+                    const config = redisBridge.resolveConfig(merged, process.env);
+                    const result = await redisBridge.testConnection(config);
+                    if (!result.ok && merged.password) {
+                        result.error = redisBridge.sanitizeError({ message: result.error }, merged.password);
+                    }
+                    res.json(result);
+                } catch (err) {
+                    runtime.logger.error('api test redis connection: ' + err);
+                    res.status(500).json({ ok: false, error: 'unexpected error' });
                 }
             });
 
@@ -250,6 +296,7 @@ function getPublicSettings(settings) {
         delete tosend.daqstore.host;
         delete tosend.daqstore.configurationString;
     }
+    delete tosend.redisBridge;
     return tosend;
 }
 
@@ -263,6 +310,9 @@ function getSanitizedSettings(settings) {
     }
     if (tosend.daqstore?.credentials) {
         delete tosend.daqstore.credentials;
+    }
+    if (tosend.redisBridge) {
+        tosend.redisBridge = redisBridge.toPublicSettings(tosend.redisBridge);
     }
     return tosend;
 }
@@ -336,6 +386,10 @@ function mergeUserSettings(settings) {
     }
     if (settings.logs) {
         runtime.settings.logs = settings.logs;
+    }
+    if (settings.redisBridge) {
+        runtime.settings.redisBridge = redisBridge.mergeSettings(
+            runtime.settings.redisBridge, settings.redisBridge);
     }
 }
 

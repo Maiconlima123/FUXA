@@ -7,7 +7,7 @@ import { environment } from '../../environments/environment';
 import { TranslateService } from '@ngx-translate/core';
 import { EndPointApi } from '../_helpers/endpointapi';
 import { ToastrService } from 'ngx-toastr';
-import { AppSettings, DaqStore, EditorSectionMessagesSettings, SmtpSettings } from '../_models/settings';
+import { AppSettings, DaqStore, EditorSectionMessagesSettings, RedisBridgeSettings, SmtpSettings } from '../_models/settings';
 
 @Injectable({
     providedIn: 'root'
@@ -141,6 +141,10 @@ export class SettingsService {
             this.appSettings.swaggerEnabled = settings.swaggerEnabled;
             dirty = true;
         }
+        if (settings.redisBridge && !this.appSettings.redisBridge.isEquals(new RedisBridgeSettings(settings.redisBridge))) {
+            this.appSettings.redisBridge = new RedisBridgeSettings(settings.redisBridge);
+            dirty = true;
+        }
         if (dirty) {
             this.settings$.next(this.appSettings);
         }
@@ -155,6 +159,11 @@ export class SettingsService {
                 this.notifySaveError(err);
             });
         }
+    }
+
+    testRedisConnection(redisSettings: RedisBridgeSettings) {
+        return this.http.post<{ ok: boolean; latencyMs?: number; error?: string }>(
+            this.endPointConfig + '/api/settings/redis/test', { redisBridge: redisSettings });
     }
 
     clearAlarms(all: boolean) {

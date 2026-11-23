@@ -202,6 +202,9 @@ try {
         if (!utils.isNullOrUndefined(mysettings.swaggerEnabled)) {
             settings.swaggerEnabled = mysettings.swaggerEnabled;
         }
+        if (mysettings.redisBridge) {
+            settings.redisBridge = Object.assign({}, settings.redisBridge || {}, mysettings.redisBridge);
+        }
         if (mysettings.nodeRedEnabled === true && utils.isNullOrUndefined(mysettings.nodeRedAuthMode)) {
             settings.nodeRedAuthMode = 'legacy-open';
         }

@@ -250,6 +250,78 @@
                     </div>
                 </div>
             </mat-tab>
+            <mat-tab label="{{'dlg.app-settings-redis' | translate}}">
+                <div class="block mt20 tab-redis">
+                    <div class="redis-hint">{{'dlg.app-settings-redis-hint' | translate}}</div>
+                    <div class="tab-redis-columns">
+                        <div class="tab-redis-col">
+                            <div class="my-form-field block system-input">
+                                <span>{{'dlg.app-settings-redis-enabled' | translate}}</span>
+                                <mat-select [(value)]="settings.redisBridge.enabled">
+                                    <mat-option [value]="true">{{'general.enabled' | translate}}</mat-option>
+                                    <mat-option [value]="false">{{'general.disabled' | translate}}</mat-option>
+                                </mat-select>
+                            </div>
+                            <div class="my-form-field block mt15 system-input">
+                                <span>{{'dlg.app-settings-redis-host' | translate}}</span>
+                                <input [(ngModel)]="settings.redisBridge.host" placeholder="redis.example.com" type="text">
+                            </div>
+                            <div class="my-form-field block mt15 system-input">
+                                <span>{{'dlg.app-settings-redis-port' | translate}}</span>
+                                <input numberOnly [(ngModel)]="settings.redisBridge.port" placeholder="6379" type="text">
+                            </div>
+                            <div class="my-form-field block mt15 system-input">
+                                <span>{{'dlg.app-settings-redis-username' | translate}}</span>
+                                <input autocomplete="off" (keydown)="keyDownStopPropagation($event)" [(ngModel)]="settings.redisBridge.username" type="text">
+                            </div>
+                            <div class="my-form-field block mt15 system-input">
+                                <span>{{'dlg.app-settings-redis-password' | translate}}</span>
+                                <input autocomplete="new-password" (keydown)="keyDownStopPropagation($event)"
+                                    [type]="showRedisPassword ? 'text' : 'password'"
+                                    [placeholder]="settings.redisBridge.hasPassword ? '********' : ''"
+                                    [(ngModel)]="settings.redisBridge.password">
+                                <mat-icon matSuffix (click)="showRedisPassword = !showRedisPassword" class="show-password">{{showRedisPassword ? 'visibility' : 'visibility_off'}}</mat-icon>
+                                <div *ngIf="settings.redisBridge.hasPassword" class="redis-field-hint">{{'dlg.app-settings-redis-password-saved' | translate}}</div>
+                            </div>
+                        </div>
+                        <div class="tab-redis-col">
+                            <div class="my-form-field block system-input">
+                                <span>{{'dlg.app-settings-redis-tls' | translate}}</span>
+                                <mat-select [(value)]="settings.redisBridge.tls">
+                                    <mat-option [value]="true">{{'general.enabled' | translate}}</mat-option>
+                                    <mat-option [value]="false">{{'general.disabled' | translate}}</mat-option>
+                                </mat-select>
+                            </div>
+                            <div class="my-form-field block mt15 system-input">
+                                <span>{{'dlg.app-settings-redis-db' | translate}}</span>
+                                <input numberOnly [(ngModel)]="settings.redisBridge.db" placeholder="0" type="text">
+                            </div>
+                            <div class="my-form-field block mt15 system-input">
+                                <span>{{'dlg.app-settings-redis-stream' | translate}}</span>
+                                <input [(ngModel)]="settings.redisBridge.stream" placeholder="stream:fuxa:events" type="text">
+                            </div>
+                            <div class="my-form-field block mt15 system-input">
+                                <span>{{'dlg.app-settings-redis-maxlen' | translate}}</span>
+                                <input numberOnly [(ngModel)]="settings.redisBridge.maxlen" placeholder="0" type="text">
+                                <div class="redis-field-hint">{{'dlg.app-settings-redis-maxlen-hint' | translate}}</div>
+                            </div>
+                            <div class="my-form-field block mt15 system-input">
+                                <span>{{'dlg.app-settings-redis-url' | translate}}</span>
+                                <input [(ngModel)]="settings.redisBridge.url" [placeholder]="settings.redisBridge.hasUrl ? '********' : 'rediss://host:6380/0'" type="text">
+                                <div class="redis-field-hint">{{'dlg.app-settings-redis-url-hint' | translate}}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="block mt15 redis-actions">
+                        <button mat-raised-button color="basic" (click)="onRedisTest()" [disabled]="!isRedisTestReady()">{{'dlg.app-settings-redis-test' | translate}}</button>
+                        <button mat-raised-button color="primary" class="ml10" (click)="onOkClick()">{{'dlg.app-settings-redis-save' | translate}}</button>
+                        <span *ngIf="redisTesting" class="redis-status">{{'dlg.app-settings-redis-testing' | translate}}</span>
+                    </div>
+                    <div *ngIf="redisTestMessage" class="redis-status"
+                        [class.redis-status-ok]="redisTestOk === true"
+                        [class.redis-status-error]="redisTestOk === false">{{redisTestMessage}}</div>
+                </div>
+            </mat-tab>
             <mat-tab label="{{'dlg.app-settings-alarms' | translate}}">
                 <div class="block mt20 tab-alarms">
                     <div class="my-form-field block">

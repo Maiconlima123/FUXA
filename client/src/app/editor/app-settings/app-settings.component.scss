@@ -34,10 +34,65 @@
         .tab-smtp,
         .tab-daq,
         .tab-alarms,
-        .tab-logs {
+        .tab-logs,
+        .tab-redis {
             padding-right: 10px;
             overflow: hidden;
         }
+
+        .tab-redis {
+            min-width: 320px;
+
+            .tab-redis-columns {
+                display: flex;
+                flex-wrap: nowrap;
+                justify-content: space-between;
+                align-items: flex-start;
+                width: 100%;
+            }
+
+            .tab-redis-col {
+                width: 330px;
+            }
+        }
+    }
+
+    .redis-hint {
+        margin-bottom: 12px;
+        padding: 6px 8px;
+        border-left: 3px solid var(--formInputBorderFocus);
+        border-radius: 2px;
+        background-color: var(--formInputBackground);
+        color: var(--formInputColor);
+        font-size: 11px;
+        line-height: 14px;
+        opacity: 0.85;
+    }
+
+    .redis-field-hint {
+        margin-top: 4px;
+        font-size: 11px;
+        line-height: 14px;
+        opacity: 0.6;
+    }
+
+    .redis-actions {
+        display: flex;
+        align-items: center;
+    }
+
+    .redis-status {
+        margin-top: 10px;
+        font-size: 12px;
+        opacity: 0.85;
+    }
+
+    .redis-status-ok {
+        color: #66bb6a;
+    }
+
+    .redis-status-error {
+        color: #ef5350;
     }
 
     .input-row {
