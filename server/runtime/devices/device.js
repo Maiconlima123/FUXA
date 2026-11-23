@@ -20,6 +20,7 @@ var GpioClient = require('./gpio');
 var WebCamClient = require('./webcam');
 var MELSECclient = require('./melsec');
 var REDISclient = require('./redis');
+var IoTHTTPclient = require('./iothttp');
 
 const path = require('path');
 const utils = require('../utils');
@@ -77,6 +78,11 @@ function Device(data, runtime) {
             return null;
         }
         comm = HTTPclient.create(data, logger, events, runtime);
+    } else if (data.type === DeviceEnum.IoTHTTP) {
+        if (!IoTHTTPclient) {
+            return null;
+        }
+        comm = IoTHTTPclient.create(data, logger, events, runtime);
     } else if (data.type === DeviceEnum.MQTTclient) {
         if (!MQTTclient) {
             return null;
@@ -630,6 +636,7 @@ var DeviceEnum = {
     OPCUA: 'OPCUA',
     ModbusRTU: 'ModbusRTU',
     ModbusTCP: 'ModbusTCP',
+    IoTHTTP: 'IoTHTTP',
     BACnet: 'BACnet',
     WebAPI: 'WebAPI',
     MQTTclient: 'MQTTclient',
