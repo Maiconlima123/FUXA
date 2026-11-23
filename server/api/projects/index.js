@@ -297,6 +297,24 @@ module.exports = {
             }
         });
 
+        /**
+         * POST IoTHTTP test request (used by the tag editor "Test read" button).
+         * body: { property, tag } -> performs one read and returns { ok, status, value, data }.
+         */
+        prjApp.post('/api/iothttp/test', secureFnc, async function (req, res) {
+            const permission = checkGroupsFnc(req);
+            if (!authJwt.haveAdminPermission(permission)) {
+                return res.status(401).json({ error: 'unauthorized_error' });
+            }
+            try {
+                const iothttp = require('../../runtime/devices/iothttp');
+                const result = await iothttp.testRequest(req.body || {});
+                res.json(result);
+            } catch (err) {
+                res.status(500).json({ ok: false, error: err.message });
+            }
+        });
+
         return prjApp;
     }
 }

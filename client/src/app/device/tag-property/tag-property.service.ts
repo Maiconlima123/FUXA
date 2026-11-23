@@ -23,6 +23,7 @@ import { TagPropertyEditWebcamComponent, TagPropertyWebcamData } from './tag-pro
 import { TagPropertyEditMelsecComponent } from './tag-property-edit-melsec/tag-property-edit-melsec.component';
 import { TagPropertyEditRedisComponent, TagPropertyRedisData } from './tag-property-edit-redis/tag-property-edit-redis.component';
 import { TagPropertyRedisScanComponent, TagPropertyRedisScanData } from './tag-property-edit-redis/tag-property-redis-scan/tag-property-redis-scan.component';
+import { TagPropertyEditIothttpComponent } from './tag-property-edit-iothttp/tag-property-edit-iothttp.component';
 import { TagPropertyEditSnmpComponent, TagPropertySnmpData } from './tag-property-edit-snmp/tag-property-edit-snmp.component';
 import { TagPropertySnmpScanComponent, TagPropertySnmpScanData } from './tag-property-edit-snmp/tag-property-snmp-scan/tag-property-snmp-scan.component';
 
@@ -59,6 +60,41 @@ export class TagPropertyService {
                         this.checkToAdd(tag, device);
                     } else if (tag.id !== oldTagId) {
                         //remove old tag device reference
+                        delete device.tags[oldTagId];
+                        this.checkToAdd(tag, device);
+                    }
+                    this.projectService.setDeviceTags(device);
+                }
+                dialogRef.close();
+                return result;
+            })
+        );
+    }
+
+    public editTagPropertyIotHttp(device: Device, tag: Tag, checkToAdd: boolean): Observable<any> {
+        let oldTagId = tag.id;
+        let tagToEdit: Tag = Utils.clone(tag);
+        let dialogRef = this.dialog.open(TagPropertyEditIothttpComponent, {
+            disableClose: true,
+            data: {
+                device: device,
+                tag: tagToEdit
+            },
+            position: { top: '60px' }
+        });
+
+        return dialogRef.componentInstance.result.pipe(
+            map(result => {
+                if (result) {
+                    tag.name = result.tagName;
+                    tag.type = result.tagType;
+                    tag.address = result.tagAddress;
+                    tag.memaddress = result.memaddress;
+                    tag.description = result.tagDescription;
+                    tag.options = result.options;
+                    if (checkToAdd) {
+                        this.checkToAdd(tag, device);
+                    } else if (tag.id !== oldTagId) {
                         delete device.tags[oldTagId];
                         this.checkToAdd(tag, device);
                     }

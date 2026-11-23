@@ -78,6 +78,51 @@ export class DevicePropertyComponent implements OnInit, OnDestroy {
 	parityType = ['None', 'Odd', 'Even'];
 	melsecFrameType = ['1E', '3E'];
 	methodType = ['GET'];//, 'POST'];
+	httpMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+	// IoT HTTP driver presets
+	iotProfile = 'custom';
+	iotProfiles = ['custom', 'firebase', 'restToken', 'basic', 'oauth', 'apiKeyHeader'];
+
+	applyIotProfile(profile: string) {
+		const p = this.data && this.data.device ? this.data.device.property : null;
+		if (!p) { return; }
+		if (profile === 'firebase') {
+			p.method = 'GET';
+			p.authMode = 'apiKey';
+			p.authQuery = 'auth';
+			p.headers = p.headers || '{"Accept":"application/json"}';
+		} else if (profile === 'restToken') {
+			p.method = 'GET';
+			p.authMode = 'bearer';
+		} else if (profile === 'basic') {
+			p.method = 'GET';
+			p.authMode = 'basic';
+		} else if (profile === 'oauth') {
+			p.method = 'GET';
+			p.authMode = 'login';
+			p.loginMethod = 'POST';
+			p.loginBody = '{"username":"{username}","password":"{password}"}';
+			p.tokenFrom = 'json';
+			p.tokenPath = 'access_token';
+			p.tokenInject = 'headerBearer';
+			p.tokenRefreshMinutes = 50;
+		} else if (profile === 'apiKeyHeader') {
+			p.method = 'GET';
+			p.authMode = 'apiKey';
+			p.authHeader = p.authHeader || 'X-API-Key';
+		}
+	}
+
+	isValidJson(value: any): boolean {
+		if (!value || typeof value !== 'string') { return true; }
+		try { JSON.parse(value); return true; } catch (_e) { return false; }
+	}
+
+	get iotHeadersInvalid(): boolean { return !this.isValidJson(this.data?.device?.property?.headers); }
+	get iotQueryInvalid(): boolean { return !this.isValidJson(this.data?.device?.property?.query); }
+	get iotReadBodyInvalid(): boolean { return !this.isValidJson(this.data?.device?.property?.readBody); }
+	get iotLoginBodyInvalid(): boolean { return !this.isValidJson(this.data?.device?.property?.loginBody); }
 	parserType = ['JSON'];//, 'CSV'];
 	hostInterfaces = [];
 	modbusRtuOptionType = [ModbusOptionType.SerialPort, ModbusOptionType.RTUBufferedPort, ModbusOptionType.AsciiPort];
