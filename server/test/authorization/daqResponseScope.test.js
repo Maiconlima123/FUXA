@@ -35,6 +35,7 @@ function createRuntime(getNodeValues) {
         jsonwebtoken: { verify: token => ({ id: token, groups: 1 }) },
         './localization': { init() {} },
         './redisBridge': { create: () => ({ start() {}, stop: () => Promise.resolve() }) },
+        './redisCommandBridge': { create: () => ({ start() {}, stop: () => Promise.resolve(), isEnabled: () => false }) },
         './fuxaTagCatalog': { create: () => ({ start() {}, stop() {}, bind() {} }) },
         './storage/daqstorage': {
             init() {},
