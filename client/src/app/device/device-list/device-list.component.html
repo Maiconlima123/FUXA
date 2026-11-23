@@ -41,6 +41,9 @@
                             <button *ngIf="!readonly && isDeviceToEdit" mat-icon-button (click)="onAddTag()" class="remove" matTooltip="{{'device.list-add' | translate}}">
                                 <mat-icon>add</mat-icon>
                             </button>
+                            <button *ngIf="!readonly && isDeviceToEdit && deviceSelected?.type === deviceType.SiemensS7" mat-icon-button (click)="onImportTags()" class="remove" matTooltip="{{'device.list-import' | translate}}">
+                                <mat-icon>upload_file</mat-icon>
+                            </button>
                         </ng-template>
                     </mat-header-cell>
                     <mat-cell *matCellDef="let element" [ngClass]="'selectidthClass'">

@@ -1,0 +1,71 @@
+<div class="import-dialog">
+    <h1 mat-dialog-title class="dialog-title">{{'device.import-title' | translate}}</h1>
+    <mat-icon (click)="cancel()" class="dialog-close-btn">clear</mat-icon>
+
+    <div mat-dialog-content class="import-content">
+        <div class="import-form">
+            <div class="my-form-field item-block">
+                <span>{{'device.import-file' | translate}}</span>
+                <input type="file" accept=".db,.csv,.txt" (change)="onFile($event)">
+            </div>
+            <div class="my-form-field item-block">
+                <span>{{'device.import-db-number' | translate}}</span>
+                <input type="number" min="1" max="65535" [(ngModel)]="dbNumber" name="dbNumber" required>
+            </div>
+            <div class="my-form-field item-block">
+                <span>{{'device.import-base-offset' | translate}}</span>
+                <input type="number" min="0" [(ngModel)]="baseOffset" name="baseOffset">
+            </div>
+            <div class="my-form-field item-block">
+                <span>{{'device.import-prefix' | translate}}</span>
+                <input type="text" [(ngModel)]="prefixFilter" name="prefixFilter" placeholder="Status_, processo_">
+            </div>
+            <div class="my-form-field item-block">
+                <span>{{'device.import-align' | translate}}</span>
+                <mat-select [(value)]="alignDword4" name="alignDword4">
+                    <mat-option [value]="true">DWord/Real = 4 bytes</mat-option>
+                    <mat-option [value]="false">DWord/Real = 2 bytes</mat-option>
+                </mat-select>
+            </div>
+        </div>
+
+        <div class="import-info" *ngIf="fileName">
+            <span>{{ fileName }} · {{ rows.length }} variáveis · <b class="ok">{{ newCount }} novas</b></span>
+        </div>
+        <div class="import-error" *ngIf="parseError">{{ parseError }}</div>
+
+        <div class="import-preview" *ngIf="rows.length">
+            <table class="import-table">
+                <thead>
+                    <tr>
+                        <th>{{'device.list-name' | translate}}</th>
+                        <th>{{'device.list-type' | translate}}</th>
+                        <th>{{'device.list-address' | translate}}</th>
+                        <th>{{'device.import-status' | translate}}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr *ngFor="let r of visibleRows()" [ngClass]="r.status">
+                        <td>{{ r.name }}</td>
+                        <td>{{ r.fuxaType || '—' }}</td>
+                        <td>{{ r.address || '—' }}</td>
+                        <td>
+                            <span *ngIf="r.status === 'new'">{{'device.import-new' | translate}}</span>
+                            <span *ngIf="r.status === 'duplicate'">{{'device.import-duplicate' | translate}}</span>
+                            <span *ngIf="r.status === 'invalid'">{{'device.import-invalid' | translate}} ({{ r.message }})</span>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <p class="import-hint">{{'device.import-hint' | translate}}</p>
+    </div>
+
+    <div mat-dialog-actions class="dialog-action">
+        <button mat-raised-button (click)="cancel()">{{'dlg.cancel' | translate}}</button>
+        <button mat-raised-button color="primary" [disabled]="newCount === 0" (click)="add()">
+            {{'device.import-add' | translate}} ({{ newCount }})
+        </button>
+    </div>
+</div>

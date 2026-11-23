@@ -16,6 +16,7 @@ import { HmiService } from '../../_services/hmi.service';
 import { ConfirmDialogComponent } from '../../gui-helpers/confirm-dialog/confirm-dialog.component';
 import { Utils } from '../../_helpers/utils';
 import { TagPropertyService } from '../tag-property/tag-property.service';
+import { TagImportS7Component } from '../tag-import-s7/tag-import-s7.component';
 
 @Component({
     selector: 'app-device-list',
@@ -232,6 +233,43 @@ export class DeviceListComponent implements OnInit, AfterViewInit {
             });
             return;
         }
+    }
+
+    /**
+     * Importação em massa de tags S7 (fonte externa .db do TIA ou CSV).
+     * Nunca sobrescreve/duplica: só insere endereços/nomes inexistentes.
+     */
+    onImportTags() {
+        if (!this.deviceSelected || this.deviceSelected.type !== DeviceType.SiemensS7) {
+            return;
+        }
+        const dialogRef = this.dialog.open(TagImportS7Component, {
+            disableClose: true,
+            data: { device: this.deviceSelected, tags: Object.values(this.deviceSelected.tags || {}) },
+            position: { top: '60px' }
+        });
+        dialogRef.afterClosed().subscribe((newTags: Tag[]) => {
+            if (!newTags || !newTags.length) {
+                return;
+            }
+            this.deviceSelected.tags = this.deviceSelected.tags || {};
+            const norm = (a: string) => String(a || '').replace(/\s/g, '').toUpperCase();
+            let added = 0;
+            for (const t of newTags) {
+                const dupAddr = Object.values(this.deviceSelected.tags).some((x: Tag) => norm(x.address) === norm(t.address));
+                const dupName = Object.values(this.deviceSelected.tags).some((x: Tag) => String(x.name || '').toLowerCase() === String(t.name || '').toLowerCase());
+                if (dupAddr || dupName) {
+                    continue; // não substitui as antigas
+                }
+                this.deviceSelected.tags[t.id] = t;
+                this.tagsMap[t.id] = t;
+                added++;
+            }
+            if (added > 0) {
+                this.bindToTable(this.deviceSelected.tags);
+                this.projectService.setDeviceTags(this.deviceSelected);
+            }
+        });
     }
 
     onScanSnmpTag() {
