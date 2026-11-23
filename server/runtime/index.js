@@ -25,6 +25,7 @@ const recipeStorage = require('./recipes/recipe-storage');
 const recipeService = require('./recipes/recipe-service');
 var jobs = require('./jobs');
 var redisBridge = require('./redisBridge');
+var fuxaTagCatalog = require('./fuxaTagCatalog');
 
 var api;
 var settings
@@ -35,6 +36,7 @@ var notificatorMgr;
 var scriptsMgr;
 var jobsMgr;
 var redisBridgeMgr;
+var tagCatalogMgr;
 var schedulerInitPromise = Promise.resolve();
 var tagsSubscription = new Map();
 var socketPool = new Map();
@@ -133,6 +135,15 @@ function init(_io, _api, _settings, _log, eventsMain) {
         settings: function () { return settings.redisBridge; }
     });
     redisBridgeMgr.start();
+
+    // tag catalog: publish tag id/name/type/address metadata to the same stream
+    tagCatalogMgr = fuxaTagCatalog.create({
+        events: events,
+        logger: logger,
+        bridge: function () { return redisBridgeMgr; },
+        getDevices: function () { return project.getDevices(); }
+    });
+    tagCatalogMgr.bind();
 
     events.on('project-device:change', updateDevice);
     events.on('device-value:changed', updateDeviceValues);
@@ -501,6 +512,14 @@ function start() {
         }).then(() => {
             // start to comunicate with devices
             devices.start().then(function () {
+                // project/devices are loaded: publish the full tag catalog
+                if (tagCatalogMgr) {
+                    try {
+                        tagCatalogMgr.start();
+                    } catch (err) {
+                        logger.error('runtime.failed-to-start-tag-catalog: ' + err);
+                    }
+                }
                 resolve(true);
             }).catch(function (err) {
                 logger.error('runtime.failed-to-start-devices: ' + err);
@@ -564,6 +583,11 @@ function stop() {
             }),
             (redisBridgeMgr ? redisBridgeMgr.stop() : Promise.resolve()).catch(function (err) {
                 logger.error('runtime.failed-to-stop-redisBridge: ' + err);
+            }),
+            Promise.resolve().then(function () {
+                if (tagCatalogMgr) {
+                    tagCatalogMgr.stop();
+                }
             })
         ]).then(function () {
             resolve(true);
@@ -601,6 +625,19 @@ function update(cmd, data) {
                 return;
             } else if (cmd === project.ProjectDataCmdType.SetReport || cmd === project.ProjectDataCmdType.DelReport) {
                 jobsMgr.reset();
+            }
+            if (cmd === project.ProjectDataCmdType.SetDevice || cmd === project.ProjectDataCmdType.DelDevice) {
+                // project data is already updated (setProjectData runs first): let
+                // the tag catalog diff the new device/tags in the background
+                try {
+                    events.emit('project-tags:changed', {
+                        deviceId: data && data.id,
+                        device: data || null,
+                        change: cmd
+                    });
+                } catch (err) {
+                    logger.error('runtime.failed-to-emit-tag-catalog-change: ' + err);
+                }
             }
             resolve(true);
         } catch (err) {

@@ -198,6 +198,25 @@ describe('runtime redis bridge', function () {
         assert.equal(ctx.bridge.isStarted(), true);
     });
 
+    it('notifies a ready handler on (re)connect and isolates its failures', function () {
+        const ctx = setup();
+        ctx.bridge.start();
+        const client = ctx.clients[0];
+        let calls = 0;
+
+        ctx.bridge.setReadyHandler(function () { calls++; });
+        client.listeners['ready']();
+        client.listeners['ready']();
+        assert.equal(calls, 2);
+
+        ctx.bridge.setReadyHandler(function () { throw new Error('ready boom'); });
+        assert.doesNotThrow(function () { client.listeners['ready'](); });
+
+        ctx.bridge.setReadyHandler(null);
+        client.listeners['ready']();
+        assert.equal(calls, 2);
+    });
+
     it('stops cleanly, removing listeners and closing the client', async function () {
         const ctx = setup();
         ctx.bridge.start();

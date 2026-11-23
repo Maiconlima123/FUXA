@@ -48,6 +48,7 @@ function registerRuntime(io, getNodeValues) {
         bluebird: require('bluebird'), './events': Events, './utils': utils,
         path, jsonwebtoken: jwt, './localization': { init },
         './redisBridge': { create: () => ({ start() {}, stop: () => Promise.resolve() }) },
+        './fuxaTagCatalog': { create: () => ({ start() {}, stop() {}, bind() {} }) },
         './storage/daqstorage': { init, getNodeValues }
     };
     for (const name of ['devices', 'project', 'users', 'apikeys', 'plugins',

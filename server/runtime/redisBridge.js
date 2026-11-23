@@ -400,6 +400,7 @@ function create(options) {
     let started = false;
     let activeConfig = null;
     let lastErrorAt = 0;
+    let readyHandler = null;
     const boundListeners = [];
 
     function currentConfig() {
@@ -439,6 +440,17 @@ function create(options) {
             detail = ': ' + (err.stack || err.message || String(err));
         }
         logger.error('redisBridge: ' + message + detail);
+    }
+
+    function notifyReady() {
+        if (typeof readyHandler !== 'function') {
+            return;
+        }
+        try {
+            readyHandler();
+        } catch (err) {
+            logError('ready handler failed', err);
+        }
     }
 
     /**
@@ -616,6 +628,7 @@ function create(options) {
                 });
                 client.on('ready', function () {
                     logInfo('connected to redis');
+                    notifyReady();
                 });
             }
             if (typeof client.connect === 'function' && (!client.status || client.status === 'wait')) {
@@ -653,6 +666,13 @@ function create(options) {
         start: start,
         stop: stop,
         publish: publish,
+        /**
+         * Register a callback fired every time the Redis connection is (re)ready.
+         * Used by the tag catalog to republish its snapshot after a reconnect.
+         */
+        setReadyHandler: function (handler) {
+            readyHandler = typeof handler === 'function' ? handler : null;
+        },
         isEnabled: isEnabled,
         isStarted: function () { return started; },
         get client() { return client; },
