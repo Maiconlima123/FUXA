@@ -16,7 +16,18 @@
  *   tag.deleted   payload = tag (last known metadata)
  *
  * Tag payload:
- *   { tagId, deviceId, name, description, type, address, dataType, unit: null, source: 'fuxa' }
+ *   { tagId, deviceId, name, description, protocol, deviceType, type, tagType,
+ *     address, dataType, registerType, unit: null, source: 'fuxa' }
+ *
+ * Protocol metadata is derived from the device (never from the tag name/address):
+ *   - protocol      normalized connection protocol, e.g. s7, modbus-tcp,
+ *                   modbus-rtu, mqtt, opcua, iothttp, httprequest, ethernetip;
+ *   - deviceType    raw FUXA device type (SiemensS7, ModbusTCP, MQTTclient, ...);
+ *   - registerType  canonical Modbus table (coil, discrete-input, input-register,
+ *                   holding-register) or any driver-provided register type;
+ *   - tagType       raw FUXA tag type as stored in the project.
+ * Only tag/device *type* metadata is exposed, never device connection settings,
+ * credentials or driver options.
  *
  * Behaviour:
  *  - the full snapshot is published when the catalog starts (project/devices
@@ -37,6 +48,60 @@ const ERROR_LOG_THROTTLE_MS = 30000;
 
 const CATALOG_EVENTS = ['project-tags:changed', 'project-device:change'];
 
+/**
+ * Normalized protocol per FUXA device type. Keep this list additive: unknown
+ * device types fall back to a normalized slug of their raw name, so a new
+ * driver never breaks the catalog.
+ */
+const PROTOCOL_BY_DEVICE_TYPE = Object.freeze({
+    SiemensS7: 's7',
+    OPCUA: 'opcua',
+    ModbusRTU: 'modbus-rtu',
+    ModbusTCP: 'modbus-tcp',
+    IoTHTTP: 'iothttp',
+    BACnet: 'bacnet',
+    WebAPI: 'httprequest',
+    MQTTclient: 'mqtt',
+    EthernetIP: 'ethernetip',
+    GenericEthernetIP: 'ethernetip',
+    OmronEthernetIP: 'omron-ethernetip',
+    FuxaServer: 'fuxa-server',
+    ODBC: 'odbc',
+    ADSclient: 'ads',
+    GPIO: 'gpio',
+    internal: 'internal',
+    WebCam: 'webcam',
+    MELSEC: 'melsec',
+    REDIS: 'redis',
+    SNMP: 'snmp'
+});
+
+/**
+ * Modbus register tables. FUXA stores the table selector in `tag.memaddress`
+ * (the low address remains in `tag.address`), so this is explicit driver
+ * metadata and not an inference from the numeric address.
+ */
+const MODBUS_REGISTER_TYPES = Object.freeze({
+    '000000': 'coil',
+    '100000': 'discrete-input',
+    '300000': 'input-register',
+    '400000': 'holding-register'
+});
+
+const REGISTER_TYPE_ALIASES = Object.freeze({
+    coil: 'coil',
+    coils: 'coil',
+    'coil-status': 'coil',
+    'discrete-input': 'discrete-input',
+    'discrete-inputs': 'discrete-input',
+    'digital-input': 'discrete-input',
+    'digital-inputs': 'discrete-input',
+    'input-register': 'input-register',
+    'input-registers': 'input-register',
+    'holding-register': 'holding-register',
+    'holding-registers': 'holding-register'
+});
+
 function isFilled(value) {
     return value !== undefined && value !== null && value !== '';
 }
@@ -48,22 +113,108 @@ function toText(value, fallback) {
     return String(value);
 }
 
+function normalizeSlug(value) {
+    const text = toText(value);
+    if (!text) {
+        return null;
+    }
+    const slug = text
+        .trim()
+        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    return slug || null;
+}
+
+/**
+ * Resolve the normalized protocol from the project device type.
+ */
+function resolveProtocol(deviceType) {
+    const raw = toText(deviceType);
+    if (!raw) {
+        return null;
+    }
+    if (Object.prototype.hasOwnProperty.call(PROTOCOL_BY_DEVICE_TYPE, raw)) {
+        return PROTOCOL_BY_DEVICE_TYPE[raw];
+    }
+    // tolerate legacy/case variations of the stored device type
+    const known = Object.keys(PROTOCOL_BY_DEVICE_TYPE).find(function (key) {
+        return key.toLowerCase() === raw.toLowerCase();
+    });
+    return known ? PROTOCOL_BY_DEVICE_TYPE[known] : normalizeSlug(raw);
+}
+
+function normalizeRegisterType(value) {
+    const slug = normalizeSlug(value);
+    if (!slug) {
+        return null;
+    }
+    return Object.prototype.hasOwnProperty.call(REGISTER_TYPE_ALIASES, slug)
+        ? REGISTER_TYPE_ALIASES[slug]
+        : slug;
+}
+
+/**
+ * Register type comes from an explicit driver/tag option when present;
+ * otherwise the Modbus table selector (`memaddress`) is used. The numeric
+ * address is never interpreted to guess a table or a data type.
+ */
+function resolveRegisterType(protocol, source) {
+    const options = (source.options && typeof source.options === 'object') ? source.options : {};
+    if (isFilled(options.registerType)) {
+        return normalizeRegisterType(options.registerType);
+    }
+    if (isFilled(source.registerType)) {
+        return normalizeRegisterType(source.registerType);
+    }
+    if (protocol === 'modbus-tcp' || protocol === 'modbus-rtu') {
+        const memaddress = toText(source.memaddress);
+        if (memaddress) {
+            const table = Object.keys(MODBUS_REGISTER_TYPES).find(function (prefix) {
+                return memaddress.trim().startsWith(prefix);
+            });
+            if (table) {
+                return MODBUS_REGISTER_TYPES[table];
+            }
+        }
+    }
+    return null;
+}
+
+function deviceTypeOf(device) {
+    if (!isFilled(device)) {
+        return null;
+    }
+    if (typeof device === 'string') {
+        return device;
+    }
+    return toText(device.type);
+}
+
 /**
  * Normalize one project tag into the public catalog shape.
  * FUXA stores the engineering data type in `type`; `dataType` mirrors it unless
- * the device driver exposes a dedicated attribute.
+ * the device driver exposes a dedicated attribute. Protocol metadata is read
+ * from the owning device, never guessed from the tag name or address.
  */
-function normalizeTag(deviceId, tagKey, tag) {
+function normalizeTag(deviceId, tagKey, tag, device) {
     const source = (tag && typeof tag === 'object') ? tag : {};
     const tagId = isFilled(source.id) ? String(source.id) : String(tagKey);
+    const deviceType = deviceTypeOf(device);
+    const protocol = resolveProtocol(deviceType);
     return {
         tagId: tagId,
         deviceId: toText(deviceId),
         name: toText(source.name, tagId),
         description: toText(source.description),
+        protocol: protocol,
+        deviceType: deviceType,
         type: toText(source.type),
+        tagType: toText(source.type),
         address: toText(source.address),
         dataType: isFilled(source.dataType) ? source.dataType : toText(source.type),
+        registerType: resolveRegisterType(protocol, source),
         unit: null,
         source: 'fuxa'
     };
@@ -137,7 +288,7 @@ function create(options) {
                 if (!tag || typeof tag !== 'object') {
                     continue;
                 }
-                tags.push(normalizeTag(deviceId, tagKey, tag));
+                tags.push(normalizeTag(deviceId, tagKey, tag, device));
             }
         }
         return tags;
