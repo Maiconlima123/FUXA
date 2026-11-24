@@ -35,6 +35,11 @@
  *  - project changes are debounced and diffed against the last known catalog,
  *    so only real creates/updates/deletes are published (no flooding, no
  *    duplicates);
+ *  - the durable key `fuxa:catalog:tags` is refreshed periodically
+ *    (FUXA_REDIS_SNAPSHOT_INTERVAL_MS, default 5 minutes; 0 disables). With
+ *    FUXA_REDIS_SNAPSHOT_KEY_ONLY=true the periodic tick refreshes only the key
+ *    (no full tag.snapshot event), which is the cheap option on 10k-tag
+ *    projects;
  *  - everything is best effort: a disabled or unreachable bridge never throws
  *    into the FUXA runtime.
  *
@@ -45,6 +50,11 @@
 
 const DEFAULT_DEBOUNCE_MS = 250;
 const ERROR_LOG_THROTTLE_MS = 30000;
+const CATALOG_KEY = 'fuxa:catalog:tags';
+// A full tag.snapshot for ~10k tags is a large XADD; 5 minutes is the new
+// default (was 1 minute). 0 disables the periodic tick entirely.
+const DEFAULT_SNAPSHOT_INTERVAL_MS = 300000;
+const MIN_SNAPSHOT_INTERVAL_MS = 15000;
 
 const CATALOG_EVENTS = ['project-tags:changed', 'project-device:change'];
 
@@ -224,6 +234,38 @@ function tagKeyOf(deviceId, tagId) {
     return String(deviceId) + '\u0000' + String(tagId);
 }
 
+function toBoolean(value, fallback) {
+    if (value === undefined || value === null || value === '') {
+        return !!fallback;
+    }
+    if (typeof value === 'boolean') {
+        return value;
+    }
+    const normalized = String(value).trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+        return true;
+    }
+    if (['0', 'false', 'no', 'off'].includes(normalized)) {
+        return false;
+    }
+    return !!fallback;
+}
+
+/**
+ * 0 disables the periodic tick; any other value is clamped to a sane minimum
+ * so a typo (1 ms) cannot turn the snapshot into a flood.
+ */
+function resolveSnapshotInterval(value, allowShort) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        return DEFAULT_SNAPSHOT_INTERVAL_MS;
+    }
+    if (parsed <= 0) {
+        return 0;
+    }
+    return allowShort ? Math.max(1, parsed) : Math.max(MIN_SNAPSHOT_INTERVAL_MS, parsed);
+}
+
 function signatureOf(tag) {
     return JSON.stringify(tag);
 }
@@ -254,6 +296,26 @@ function create(options) {
     const debounceMs = Number.isFinite(Number(options.debounceMs)) && Number(options.debounceMs) >= 0
         ? Number(options.debounceMs)
         : DEFAULT_DEBOUNCE_MS;
+
+    // Durable tag catalog key (source of truth for metadata).
+    const catalogKey = isFilled(options.catalogKey)
+        ? String(options.catalogKey).trim()
+        : (isFilled(process.env.FUXA_REDIS_CATALOG_KEY)
+            ? String(process.env.FUXA_REDIS_CATALOG_KEY).trim()
+            : CATALOG_KEY);
+    // Periodic refresh: a full snapshot event for ~10k tags is a large XADD, so
+    // the default dropped from 1 min to 5 min and can be lowered/disabled with
+    // FUXA_REDIS_SNAPSHOT_INTERVAL_MS (0 disables the periodic tick).
+    const snapshotIntervalMs = resolveSnapshotInterval(
+        options.snapshotIntervalMs !== undefined
+            ? options.snapshotIntervalMs
+            : process.env.FUXA_REDIS_SNAPSHOT_INTERVAL_MS,
+        options.snapshotIntervalMs !== undefined);
+    // When true the periodic tick only refreshes the durable key, so consumers
+    // that were offline still resync without paying for a stream snapshot.
+    const snapshotKeyOnly = options.snapshotKeyOnly !== undefined
+        ? toBoolean(options.snapshotKeyOnly)
+        : toBoolean(process.env.FUXA_REDIS_SNAPSHOT_KEY_ONLY, false);
 
     let started = false;
     let knownTags = new Map();
@@ -340,7 +402,7 @@ function create(options) {
                 count: tags.length,
                 tags: tags
             });
-            const result = client.set(CATALOG_KEY, body);
+            const result = client.set(catalogKey, body);
             if (result && typeof result.catch === 'function') {
                 result.catch(function (err) {
                     logError('failed to persist catalog key', err);
@@ -368,6 +430,24 @@ function create(options) {
             });
         } catch (err) {
             logError('failed to publish snapshot', err);
+            return false;
+        }
+    }
+
+    /**
+     * Refresh only the durable catalog key. Used by the periodic tick in
+     * key-only mode: consumers that were offline resync from the key without
+     * paying for a full stream snapshot, and the diff baseline is left alone so
+     * a pending create/update/delete is never swallowed.
+     */
+    function refreshCatalogKey() {
+        if (!started) {
+            return false;
+        }
+        try {
+            return writeCatalogKey(collectTags());
+        } catch (err) {
+            logError('failed to refresh catalog key', err);
             return false;
         }
     }
@@ -514,8 +594,6 @@ function create(options) {
         }
     }
 
-    const CATALOG_KEY = process.env.FUXA_REDIS_CATALOG_KEY || 'fuxa:catalog:tags';
-    const SNAPSHOT_INTERVAL_MS = Math.max(15000, Number(process.env.FUXA_REDIS_SNAPSHOT_INTERVAL_MS) || 60000);
     let snapshotRetry = null;
     let snapshotTimer = null;
 
@@ -539,14 +617,25 @@ function create(options) {
         const bridgeEnabled = bridge && (typeof bridge.isEnabled !== 'function' || bridge.isEnabled());
         const published = publishSnapshot();
         if (!published && bridgeEnabled) retrySnapshot(1);
-        // Refresh the durable catalog and stream snapshot periodically so a
-        // consumer that was offline does not depend on the high-frequency
-        // tag.changed stream retaining the startup snapshot.
+        // Refresh the durable catalog periodically so a consumer that was offline
+        // does not depend on the high-frequency tag.changed stream retaining the
+        // startup snapshot. In key-only mode the tick skips the (large) stream
+        // snapshot; FUXA_REDIS_SNAPSHOT_INTERVAL_MS=0 disables the tick.
         if (snapshotTimer) clearInterval(snapshotTimer);
-        snapshotTimer = setInterval(function () {
-            if (started) publishSnapshot();
-        }, SNAPSHOT_INTERVAL_MS);
-        if (snapshotTimer.unref) snapshotTimer.unref();
+        snapshotTimer = null;
+        if (snapshotIntervalMs > 0) {
+            snapshotTimer = setInterval(function () {
+                if (!started) {
+                    return;
+                }
+                if (snapshotKeyOnly) {
+                    refreshCatalogKey();
+                } else {
+                    publishSnapshot();
+                }
+            }, snapshotIntervalMs);
+            if (snapshotTimer.unref) snapshotTimer.unref();
+        }
         return published;
     }
 
@@ -582,10 +671,15 @@ function create(options) {
         stop: stop,
         isStarted: function () { return started; },
         publishSnapshot: publishSnapshot,
+        refreshCatalogKey: refreshCatalogKey,
         flush: flush,
         handleProjectChange: handleProjectChange,
         getSnapshot: getSnapshot,
-        normalizeTag: normalizeTag
+        normalizeTag: normalizeTag,
+        // resolved configuration, exposed for diagnostics and tests
+        catalogKey: catalogKey,
+        snapshotIntervalMs: snapshotIntervalMs,
+        snapshotKeyOnly: snapshotKeyOnly
     };
 }
 
@@ -593,5 +687,7 @@ module.exports = {
     create: create,
     normalizeTag: normalizeTag,
     DEFAULT_DEBOUNCE_MS: DEFAULT_DEBOUNCE_MS,
+    DEFAULT_SNAPSHOT_INTERVAL_MS: DEFAULT_SNAPSHOT_INTERVAL_MS,
+    MIN_SNAPSHOT_INTERVAL_MS: MIN_SNAPSHOT_INTERVAL_MS,
     CATALOG_EVENTS: CATALOG_EVENTS
 };

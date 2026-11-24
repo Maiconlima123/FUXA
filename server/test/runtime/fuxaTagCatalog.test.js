@@ -45,7 +45,9 @@ function setup(config) {
         logger: logger,
         bridge: function () { return bridge; },
         getDevices: function () { return state.devices; },
-        debounceMs: config.debounceMs !== undefined ? config.debounceMs : 0
+        debounceMs: config.debounceMs !== undefined ? config.debounceMs : 0,
+        snapshotIntervalMs: config.snapshotIntervalMs,
+        snapshotKeyOnly: config.snapshotKeyOnly
     });
     return { events, logger, published, state, catalog };
 }
@@ -200,7 +202,10 @@ describe('runtime fuxa tag catalog', function () {
     it('keeps the durable catalog key backward compatible with the new fields', function () {
         let stored = null;
         const bridge = {
-            publish: function () { return true; },
+            publish: function (type, payload) {
+                ctx.published.push({ type: type, payload: payload });
+                return true;
+            },
             client: {
                 status: 'ready',
                 set: function (key, body) {
@@ -402,5 +407,105 @@ describe('runtime fuxa tag catalog', function () {
         assert.doesNotThrow(function () { ctx.catalog.start(); });
         assert.equal(ctx.published.length, 1);
         assert.deepEqual(ctx.published[0].payload.tags.map(function (entry) { return entry.tagId; }), ['good']);
+    });
+
+    it('refreshes the durable catalog every 5 minutes by default', function () {
+        const ctx = setup({
+            devices: { dev1: { id: 'dev1', tags: { t1: tag('t1') } } }
+        });
+
+        assert.equal(ctx.catalog.catalogKey, 'fuxa:catalog:tags');
+        assert.equal(ctx.catalog.snapshotIntervalMs, 300000);
+        assert.equal(ctx.catalog.snapshotKeyOnly, false);
+        assert.equal(fuxaTagCatalog.DEFAULT_SNAPSHOT_INTERVAL_MS, 300000);
+        ctx.catalog.stop();
+    });
+
+    it('writes only the durable key on the periodic tick when snapshotKeyOnly is set', async function () {
+        let sets = 0;
+        const bridge = {
+            publish: function (type, payload) {
+                ctx.published.push({ type: type, payload: payload });
+                return true;
+            },
+            client: {
+                status: 'ready',
+                set: function () { sets++; return Promise.resolve('OK'); }
+            }
+        };
+        const ctx = setup({
+            devices: { dev1: { id: 'dev1', tags: { t1: tag('t1') } } },
+            bridge: bridge,
+            snapshotIntervalMs: 20,
+            snapshotKeyOnly: true
+        });
+
+        assert.equal(ctx.catalog.start(), true);
+        assert.equal(ctx.published.length, 1, 'start still publishes one stream snapshot');
+        assert.equal(sets, 1, 'start also writes the durable key');
+
+        await new Promise(function (resolve) { setTimeout(resolve, 80); });
+
+        assert.ok(sets > 1, 'the periodic tick refreshed the durable key');
+        assert.equal(ctx.published.length, 1, 'no full tag.snapshot on the periodic tick');
+        ctx.catalog.stop();
+    });
+
+    it('can disable the periodic refresh entirely', async function () {
+        let sets = 0;
+        const bridge = {
+            publish: function (type, payload) {
+                ctx.published.push({ type: type, payload: payload });
+                return true;
+            },
+            client: {
+                status: 'ready',
+                set: function () { sets++; return Promise.resolve('OK'); }
+            }
+        };
+        const ctx = setup({
+            devices: { dev1: { id: 'dev1', tags: { t1: tag('t1') } } },
+            bridge: bridge,
+            snapshotIntervalMs: 0
+        });
+
+        ctx.catalog.start();
+        assert.equal(ctx.catalog.snapshotIntervalMs, 0);
+        const initialSets = sets;
+        await new Promise(function (resolve) { setTimeout(resolve, 60); });
+
+        assert.equal(sets, initialSets);
+        assert.equal(ctx.published.length, 1);
+        ctx.catalog.stop();
+    });
+
+    it('refreshCatalogKey never rebases the diff baseline', function () {
+        let sets = 0;
+        const bridge = {
+            publish: function (type, payload) {
+                ctx.published.push({ type: type, payload: payload });
+                return true;
+            },
+            client: {
+                status: 'ready',
+                set: function () { sets++; return Promise.resolve('OK'); }
+            }
+        };
+        const ctx = setup({
+            devices: { dev1: { id: 'dev1', tags: { t1: tag('t1') } } },
+            bridge: bridge
+        });
+
+        ctx.catalog.start();
+        ctx.published.length = 0;
+        ctx.state.devices.dev1.tags.t2 = tag('t2');
+
+        ctx.catalog.refreshCatalogKey();
+        assert.equal(sets, 2, 'the key was refreshed');
+        assert.equal(ctx.published.length, 0, 'no stream event');
+
+        ctx.catalog.flush();
+        assert.deepEqual(typesOf(ctx.published), ['tag.created']);
+        assert.equal(ctx.published[0].payload.tagId, 't2');
     });
 });

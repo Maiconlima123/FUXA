@@ -17,6 +17,39 @@
  *   FUXA_REDIS_STREAM   stream key (default 'stream:fuxa:events')
  *   FUXA_REDIS_MAXLEN   optional approximate cap for the stream (XADD MAXLEN ~)
  *
+ * Capacity options (high tag counts, ~1k-2k changes/s):
+ *   FUXA_REDIS_BATCH_ENABLED     'true' to coalesce tag changes (default 'false')
+ *   FUXA_REDIS_BATCH_WINDOW_MS   coalescing window, clamped 100..500 (default 200)
+ *   FUXA_REDIS_BATCH_MAX         max changes per batch event (default 1000)
+ *   FUXA_REDIS_VALUES_ENABLED    maintain the live values key (default 'true')
+ *   FUXA_REDIS_VALUES_KEY        live values key (default 'fuxa:catalog:values')
+ *   FUXA_REDIS_VALUES_KEY_TYPE   'hash' (default) or 'string' (legacy JSON doc)
+ *   FUXA_REDIS_VALUES_FLUSH_MS   values write interval, 100..60000 (default 1000)
+ *   FUXA_REDIS_VALUES_MAX_TAGS   in-memory bound for the values map (default 20000)
+ *
+ * Tag changes:
+ *  - batching disabled (default): one `tag.changed` event per tag, exactly as
+ *    before this option existed;
+ *  - batching enabled: every change is kept in a per-(device,tag) map (last
+ *    write wins) and flushed once per window as one event:
+ *
+ *      { version, eventId, type: 'tag.changed.batch', ts, source: 'fuxa',
+ *        payload: { count, changes: [
+ *          { deviceId, tagId, value, timestamp, quality }, ... ] } }
+ *
+ *    A batch never exceeds FUXA_REDIS_BATCH_MAX changes; bigger bursts are
+ *    split into several events inside the same window.
+ *
+ * Live values key:
+ *  - `fuxa:catalog:values` is written as a Redis hash (field = tagId, value =
+ *    JSON {value,timestamp,quality,deviceId}) at most once per flush interval,
+ *    with one HSET per 500 fields, so 10k tags never produce 10k commands;
+ *  - `FUXA_REDIS_VALUES_KEY_TYPE=string` keeps the older shape
+ *    ({version,count,values:{tagId:{...}}}) as a single SET, for consumers that
+ *    still read the key with GET;
+ *  - the whole map is rewritten after a (re)connect so a Redis restart does not
+ *    lose the snapshot. There is no periodic full rewrite.
+ *
  * This bridge only talks to an external Redis-compatible service. It never
  * starts or embeds Redis.
  *
@@ -33,6 +66,21 @@ const DEFAULT_STREAM = 'stream:fuxa:events';
 const DEFAULT_SOURCE = 'fuxa';
 const DEFAULT_TEST_TIMEOUT_MS = 3000;
 const ERROR_LOG_THROTTLE_MS = 30000;
+
+const DEFAULT_BATCH_WINDOW_MS = 200;
+const MIN_BATCH_WINDOW_MS = 100;
+const MAX_BATCH_WINDOW_MS = 500;
+const DEFAULT_BATCH_MAX = 1000;
+const MAX_BATCH_MAX = 100000;
+
+const DEFAULT_VALUES_KEY = 'fuxa:catalog:values';
+const DEFAULT_VALUES_FLUSH_MS = 1000;
+const MIN_VALUES_FLUSH_MS = 100;
+const MAX_VALUES_FLUSH_MS = 60000;
+const DEFAULT_VALUES_MAX_TAGS = 20000;
+// one HSET carries up to 500 fields (1000 arguments): big enough to keep 10k
+// tags down to ~20 commands, small enough to stay well under client limits.
+const VALUES_CHUNK_FIELDS = 500;
 
 function isFilled(value) {
     return value !== undefined && value !== null && value !== '';
@@ -58,6 +106,32 @@ function parseBoolean(value, fallback) {
 function parseMaxlen(value) {
     const parsed = Number.parseInt(value, 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * Parse an integer and clamp it into [min, max]. Unparseable values fall back
+ * to the default, so a typo in an env var never disables a safety limit.
+ */
+function clampInteger(value, min, max, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) {
+        return fallback;
+    }
+    if (parsed < min) {
+        return min;
+    }
+    if (parsed > max) {
+        return max;
+    }
+    return parsed;
+}
+
+function parseValuesKeyType(value) {
+    const normalized = String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+    if (normalized === 'string' || normalized === 'json') {
+        return 'string';
+    }
+    return 'hash';
 }
 
 function generateEventId() {
@@ -273,7 +347,20 @@ function resolveConfig(settings, env) {
         url: url,
         stream: stream,
         maxlen: maxlen,
-        source: DEFAULT_SOURCE
+        source: DEFAULT_SOURCE,
+        // capacity options: env only (not persisted in the editor settings yet)
+        batchEnabled: parseBoolean(env.FUXA_REDIS_BATCH_ENABLED, false),
+        batchWindowMs: clampInteger(env.FUXA_REDIS_BATCH_WINDOW_MS,
+            MIN_BATCH_WINDOW_MS, MAX_BATCH_WINDOW_MS, DEFAULT_BATCH_WINDOW_MS),
+        batchMax: clampInteger(env.FUXA_REDIS_BATCH_MAX, 1, MAX_BATCH_MAX, DEFAULT_BATCH_MAX),
+        valuesEnabled: parseBoolean(env.FUXA_REDIS_VALUES_ENABLED, true),
+        valuesKey: isFilled(env.FUXA_REDIS_VALUES_KEY)
+            ? String(env.FUXA_REDIS_VALUES_KEY).trim()
+            : DEFAULT_VALUES_KEY,
+        valuesKeyType: parseValuesKeyType(env.FUXA_REDIS_VALUES_KEY_TYPE),
+        valuesFlushMs: clampInteger(env.FUXA_REDIS_VALUES_FLUSH_MS,
+            MIN_VALUES_FLUSH_MS, MAX_VALUES_FLUSH_MS, DEFAULT_VALUES_FLUSH_MS),
+        valuesMaxTags: clampInteger(env.FUXA_REDIS_VALUES_MAX_TAGS, 1, 1000000, DEFAULT_VALUES_MAX_TAGS)
     };
 }
 
@@ -403,6 +490,14 @@ function create(options) {
     let readyHandler = null;
     const boundListeners = [];
 
+    // tag.changed coalescing (opt-in)
+    let pendingBatch = new Map();
+    let batchTimer = null;
+    // latest value per tag + the subset still to be written to the values key
+    let latestValues = new Map();
+    let dirtyValues = new Map();
+    let valuesTimer = null;
+
     function currentConfig() {
         const config = resolveConfig(settingsProvider(), env);
         if (options.url) {
@@ -416,6 +511,35 @@ function create(options) {
         }
         if (options.enabled !== undefined) {
             config.enabled = parseBoolean(options.enabled);
+        }
+        // explicit options win over env (used by tests and embedders) and stay
+        // inside the documented ranges, so a bad option cannot disable batching
+        // silently or flood Redis with sub-100ms windows.
+        if (options.batchEnabled !== undefined) {
+            config.batchEnabled = parseBoolean(options.batchEnabled);
+        }
+        if (options.batchWindowMs !== undefined) {
+            config.batchWindowMs = clampInteger(options.batchWindowMs,
+                MIN_BATCH_WINDOW_MS, MAX_BATCH_WINDOW_MS, config.batchWindowMs);
+        }
+        if (options.batchMax !== undefined) {
+            config.batchMax = clampInteger(options.batchMax, 1, MAX_BATCH_MAX, config.batchMax);
+        }
+        if (options.valuesEnabled !== undefined) {
+            config.valuesEnabled = parseBoolean(options.valuesEnabled);
+        }
+        if (options.valuesKey) {
+            config.valuesKey = String(options.valuesKey).trim();
+        }
+        if (options.valuesKeyType) {
+            config.valuesKeyType = parseValuesKeyType(options.valuesKeyType);
+        }
+        if (options.valuesFlushMs !== undefined) {
+            config.valuesFlushMs = clampInteger(options.valuesFlushMs,
+                MIN_VALUES_FLUSH_MS, MAX_VALUES_FLUSH_MS, config.valuesFlushMs);
+        }
+        if (options.valuesMaxTags !== undefined) {
+            config.valuesMaxTags = clampInteger(options.valuesMaxTags, 1, 1000000, config.valuesMaxTags);
         }
         return config;
     }
@@ -488,6 +612,235 @@ function create(options) {
         }
     }
 
+    function isClientReady() {
+        return !!(client && activeConfig && (!client.status || client.status === 'ready'));
+    }
+
+    function clearBatchTimer() {
+        if (batchTimer) {
+            clearTimeout(batchTimer);
+            batchTimer = null;
+        }
+    }
+
+    /**
+     * Remember the latest value of one tag and mark it for the values key.
+     * Bounded: when the map is full the oldest tag is dropped instead of growing
+     * without limit on a project with many transient/unknown tag ids.
+     */
+    function rememberValue(tagId, change) {
+        if (!activeConfig || !activeConfig.valuesEnabled) {
+            return;
+        }
+        const record = {
+            value: change.value,
+            timestamp: change.timestamp,
+            quality: change.quality,
+            deviceId: change.deviceId
+        };
+        latestValues.set(tagId, record);
+        dirtyValues.set(tagId, record);
+        const maxTags = activeConfig.valuesMaxTags;
+        while (latestValues.size > maxTags) {
+            const oldest = latestValues.keys().next();
+            if (oldest.done) {
+                break;
+            }
+            latestValues.delete(oldest.value);
+            dirtyValues.delete(oldest.value);
+        }
+    }
+
+    /**
+     * Queue one change for the next batch (last write wins per device+tag).
+     */
+    function enqueueChange(change) {
+        pendingBatch.set(String(change.deviceId) + '\u0000' + String(change.tagId), change);
+        if (pendingBatch.size >= activeConfig.batchMax) {
+            // never let a burst grow past one batch event; flush early instead.
+            flushBatch();
+            return;
+        }
+        if (batchTimer) {
+            return;
+        }
+        batchTimer = setTimeout(function () {
+            batchTimer = null;
+            flushBatch();
+        }, activeConfig.batchWindowMs);
+        if (batchTimer && typeof batchTimer.unref === 'function') {
+            // never keep the process alive just to publish a batch
+            batchTimer.unref();
+        }
+    }
+
+    /**
+     * Publish the queued changes as `tag.changed.batch` events (max
+     * FUXA_REDIS_BATCH_MAX changes each) and clear the queue.
+     *
+     * @returns {boolean} true when at least one event was handed to Redis
+     */
+    function flushBatch() {
+        clearBatchTimer();
+        if (pendingBatch.size === 0) {
+            return false;
+        }
+        const changes = Array.from(pendingBatch.values());
+        pendingBatch.clear();
+        const batchMax = activeConfig && activeConfig.batchMax ? activeConfig.batchMax : DEFAULT_BATCH_MAX;
+        let published = false;
+        for (let offset = 0; offset < changes.length; offset += batchMax) {
+            const slice = changes.slice(offset, offset + batchMax);
+            if (publish('tag.changed.batch', { count: slice.length, changes: slice })) {
+                published = true;
+            }
+        }
+        return published;
+    }
+
+    /**
+     * Re-queue entries whose write failed, but only when no newer value for the
+     * same tag arrived in the meantime (that newer value is already queued).
+     */
+    function requeueValues(entries) {
+        for (const entry of entries) {
+            if (latestValues.get(entry[0]) === entry[1]) {
+                dirtyValues.set(entry[0], entry[1]);
+            }
+        }
+    }
+
+    function writeValuesHash(entries) {
+        if (typeof client.hset !== 'function') {
+            return false;
+        }
+        // capture the key: a late rejection must not read a cleared activeConfig
+        const key = activeConfig.valuesKey;
+        let written = false;
+        for (let offset = 0; offset < entries.length; offset += VALUES_CHUNK_FIELDS) {
+            const slice = entries.slice(offset, offset + VALUES_CHUNK_FIELDS);
+            const args = [key];
+            for (const entry of slice) {
+                args.push(String(entry[0]), JSON.stringify(entry[1]));
+            }
+            try {
+                const result = client.hset.apply(client, args);
+                written = true;
+                if (result && typeof result.catch === 'function') {
+                    result.catch((function (failed) {
+                        return function (err) {
+                            requeueValues(failed);
+                            logError('failed to update ' + key, err);
+                        };
+                    })(slice));
+                }
+            } catch (err) {
+                requeueValues(slice);
+                logError('failed to update ' + key, err);
+            }
+        }
+        return written;
+    }
+
+    function writeValuesString(entries) {
+        if (typeof client.set !== 'function') {
+            return false;
+        }
+        const key = activeConfig.valuesKey;
+        const values = {};
+        latestValues.forEach(function (record, tagId) {
+            values[tagId] = record;
+        });
+        const body = JSON.stringify({
+            version: 1,
+            updatedAt: new Date().toISOString(),
+            count: Object.keys(values).length,
+            values: values
+        });
+        try {
+            const result = client.set(key, body);
+            if (result && typeof result.catch === 'function') {
+                result.catch(function (err) {
+                    requeueValues(entries);
+                    logError('failed to update ' + key, err);
+                });
+            }
+            return true;
+        } catch (err) {
+            logError('failed to update ' + key, err);
+            return false;
+        }
+    }
+
+    /**
+     * Write the latest values snapshot. Only dirty tags are written, in chunks,
+     * so 10k tags cost a handful of commands per interval instead of 10k HSETs.
+     *
+     * @param {object} [flushOptions] { force: rewrite every known value }
+     * @returns {boolean} true when the write was handed to Redis
+     */
+    function flushValues(flushOptions) {
+        const force = !!(flushOptions && flushOptions.force);
+        if (!activeConfig || !activeConfig.valuesEnabled) {
+            return false;
+        }
+        if (!isClientReady()) {
+            return false;
+        }
+        if (!force && dirtyValues.size === 0) {
+            return true;
+        }
+        const entries = force
+            ? Array.from(latestValues.entries())
+            : Array.from(dirtyValues.entries());
+        if (!force) {
+            dirtyValues.clear();
+        }
+        if (entries.length === 0) {
+            return true;
+        }
+        try {
+            const written = activeConfig.valuesKeyType === 'string'
+                ? writeValuesString(entries)
+                : writeValuesHash(entries);
+            if (!written) {
+                requeueValues(entries);
+            }
+            return written;
+        } catch (err) {
+            requeueValues(entries);
+            logError('failed to flush values', err);
+            return false;
+        }
+    }
+
+    function clearValues() {
+        latestValues = new Map();
+        dirtyValues = new Map();
+    }
+
+    function startValuesTimer() {
+        stopValuesTimer();
+        if (!activeConfig || !activeConfig.valuesEnabled) {
+            return;
+        }
+        valuesTimer = setInterval(function () {
+            if (started) {
+                flushValues();
+            }
+        }, activeConfig.valuesFlushMs);
+        if (valuesTimer && typeof valuesTimer.unref === 'function') {
+            valuesTimer.unref();
+        }
+    }
+
+    function stopValuesTimer() {
+        if (valuesTimer) {
+            clearInterval(valuesTimer);
+            valuesTimer = null;
+        }
+    }
+
     const handlers = {
         'device-value:changed': function (event) {
             if (!event || event.id === undefined || event.id === null) {
@@ -496,18 +849,26 @@ function create(options) {
             if (!event.values || typeof event.values !== 'object') {
                 return;
             }
+            const batching = !!(activeConfig && activeConfig.batchEnabled);
             for (const tagId of Object.keys(event.values)) {
                 const tag = event.values[tagId];
                 if (!tag || typeof tag !== 'object') {
                     continue;
                 }
-                publish('tag.changed', {
+                const change = {
                     deviceId: event.id,
                     tagId: tagId,
                     value: tag.value === undefined ? null : tag.value,
                     timestamp: tag.timestamp === undefined ? null : tag.timestamp,
                     quality: tag.quality === undefined ? null : tag.quality
-                });
+                };
+                // The values key always keeps the latest value, batched or not.
+                rememberValue(tagId, change);
+                if (batching) {
+                    enqueueChange(change);
+                } else {
+                    publish('tag.changed', change);
+                }
             }
         },
         'device-status:changed': function (event) {
@@ -633,6 +994,10 @@ function create(options) {
                 });
                 client.on('ready', function () {
                     logInfo('connected to redis');
+                    // Rewrite the values map after a (re)connect: a Redis restart
+                    // would otherwise lose the snapshot until every tag changes
+                    // again. Nothing is written when no tag was seen yet.
+                    flushValues({ force: true });
                     notifyReady();
                 });
             }
@@ -641,9 +1006,17 @@ function create(options) {
                     logError('failed to connect', err);
                 });
             }
+            startValuesTimer();
             started = true;
             logInfo('publishing runtime events to stream ' + config.stream +
-                (config.maxlen ? ' (maxlen ~ ' + config.maxlen + ')' : ''));
+                (config.maxlen ? ' (maxlen ~ ' + config.maxlen + ')' : '') +
+                (config.batchEnabled
+                    ? ' (batching tag.changed every ' + config.batchWindowMs + 'ms, max ' + config.batchMax + ')'
+                    : '') +
+                (config.valuesEnabled
+                    ? ' (values key ' + config.valuesKey + ' as ' + config.valuesKeyType +
+                        ' every ' + config.valuesFlushMs + 'ms)'
+                    : ''));
             return true;
         } catch (err) {
             logError('failed to start', err);
@@ -656,6 +1029,20 @@ function create(options) {
     function stop() {
         unbindEvents();
         started = false;
+        // best effort: hand over whatever is queued before the client closes
+        try {
+            flushBatch();
+        } catch (err) {
+            logError('failed to flush batch on stop', err);
+        }
+        try {
+            flushValues();
+        } catch (err) {
+            logError('failed to flush values on stop', err);
+        }
+        clearBatchTimer();
+        stopValuesTimer();
+        clearValues();
         return cleanupClient();
     }
 
@@ -671,6 +1058,21 @@ function create(options) {
         start: start,
         stop: stop,
         publish: publish,
+        /** Publish queued tag changes now (no-op when batching is disabled). */
+        flushBatch: flushBatch,
+        /**
+         * Write the live values key now. `force` rewrites every known value
+         * instead of only the changed ones.
+         */
+        flushValues: flushValues,
+        /** Snapshot of the in-memory latest values (tagId -> value record). */
+        getLatestValues: function () {
+            const out = {};
+            latestValues.forEach(function (record, tagId) {
+                out[tagId] = record;
+            });
+            return out;
+        },
         /**
          * Register a callback fired every time the Redis connection is (re)ready.
          * Used by the tag catalog to republish its snapshot after a reconnect.
@@ -691,7 +1093,12 @@ function create(options) {
         isStarted: function () { return started; },
         get client() { return client; },
         get stream() { return activeConfig ? activeConfig.stream : undefined; },
-        get maxlen() { return activeConfig ? activeConfig.maxlen : undefined; }
+        get maxlen() { return activeConfig ? activeConfig.maxlen : undefined; },
+        get batchEnabled() { return !!(activeConfig && activeConfig.batchEnabled); },
+        get batchWindowMs() { return activeConfig ? activeConfig.batchWindowMs : undefined; },
+        get batchMax() { return activeConfig ? activeConfig.batchMax : undefined; },
+        get valuesKey() { return activeConfig ? activeConfig.valuesKey : undefined; },
+        get valuesKeyType() { return activeConfig ? activeConfig.valuesKeyType : undefined; }
     };
 }
 
